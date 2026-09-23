@@ -27,6 +27,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
@@ -68,11 +69,30 @@ import java.util.TimeZone
  * ```
  *
  * Requires [FeedbackJar.init] to have been called. Nothing throws — failures show inline.
+ *
+ * @param properties called each time the board's own "New" screen sends feedback, to get
+ *   custom key/value pairs merged into the auto-collected metadata. Forwarded verbatim to
+ *   [FeedbackJar.submit]'s `properties` parameter.
+ * @param commentIdentity called each time a comment is sent from a post's detail screen, to
+ *   get the name/email (`first`/`second`) to attach to it. Return `null`, or a `null` field,
+ *   to fall back to the remembered identity (the default when this is omitted entirely).
+ * @param resetIdentity a host-hoisted flag; flip it to `true` to forget the remembered
+ *   submitter identity (e.g. on logout) and refresh the board as a clean anonymous guest.
+ *   The board clears [FeedbackJar.clearIdentity], drops back to the board list and reloads
+ *   it. Since this is read-only `State`, the host is responsible for flipping it back to
+ *   `false` afterwards so a later reset can fire again.
+ * @param openPostId a host-hoisted post id; set it to jump the board straight to that post's
+ *   detail screen (e.g. from a push notification). Since this is read-only `State`, the host
+ *   is responsible for clearing it back to `null` afterwards so a later jump can fire again.
  */
 @Composable
 fun FeedbackJarBoard(
     accentColor: Color = Color(0xFFE5484D),
     boardId: String? = null,
+    properties: (() -> Map<String, Any?>?)? = null,
+    commentIdentity: (() -> Pair<String?, String?>?)? = null,
+    resetIdentity: State<Boolean>? = null,
+    openPostId: State<String?>? = null,
 ) {
     val palette = if (isSystemInDarkTheme()) DarkPalette else LightPalette
     val theme = remember(palette, accentColor) { FjTheme(palette, accentColor) }
@@ -93,6 +113,22 @@ fun FeedbackJarBoard(
         rootScope.launch { FeedbackJar.getPost(postId).onSuccess { screen = Screen.Detail(it) } }
     }
 
+    // A host flips this to true to log the submitter out — forget the remembered identity,
+    // drop back to the board and reload it as a clean anonymous guest.
+    LaunchedEffect(resetIdentity?.value) {
+        if (resetIdentity?.value == true) {
+            FeedbackJar.clearIdentity()
+            screen = Screen.Board
+            reloadKey++
+        }
+    }
+
+    // A host sets this to a post id to jump straight to its detail screen, e.g. from a
+    // push notification.
+    LaunchedEffect(openPostId?.value) {
+        openPostId?.value?.let { openPost(it) }
+    }
+
     Box(Modifier.fillMaxSize().background(theme.bg)) {
         when (val s = screen) {
             Screen.Board -> BoardScreen(
@@ -111,6 +147,7 @@ fun FeedbackJarBoard(
                     theme = theme,
                     config = config,
                     post = s.post,
+                    commentIdentity = commentIdentity,
                     onBack = { screen = Screen.Board },
                     onPostPress = ::openPost,
                 )
@@ -119,6 +156,7 @@ fun FeedbackJarBoard(
             Screen.New -> NewFeedbackScreen(
                 theme = theme,
                 config = config,
+                properties = properties,
                 onCancel = { screen = Screen.Board },
                 onDone = {
                     reloadKey++
@@ -268,8 +306,10 @@ private fun VotePill(
     onChange: (Int, Boolean) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    var count by remember(postId) { mutableStateOf(upvotes) }
-    var voted by remember(postId) { mutableStateOf(hasVoted) }
+    // Keyed on the incoming count/state too, so an authoritative refresh from the caller
+    // (e.g. a standalone getVoteState() read) replaces the locally-held value.
+    var count by remember(postId, upvotes) { mutableStateOf(upvotes) }
+    var voted by remember(postId, hasVoted) { mutableStateOf(hasVoted) }
     var busy by remember(postId) { mutableStateOf(false) }
 
     Column(
@@ -429,6 +469,7 @@ private fun DetailScreen(
     theme: FjTheme,
     config: WidgetConfig,
     post: FeedbackPost,
+    commentIdentity: (() -> Pair<String?, String?>?)? = null,
     onBack: () -> Unit,
     onPostPress: (String) -> Unit = {},
 ) {
@@ -440,6 +481,18 @@ private fun DetailScreen(
     var draft by remember { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
     var replyTo by remember { mutableStateOf<FeedbackComment?>(null) }
+    var voteUpvotes by remember(post.id) { mutableStateOf(post.upvotes) }
+    var voteHasVoted by remember(post.id) { mutableStateOf(post.hasVoted) }
+
+    // The cached post data can be stale — read the authoritative vote state once on open.
+    LaunchedEffect(post.id) {
+        if (config.allowVotes) {
+            FeedbackJar.getVoteState(post.id).onSuccess { state ->
+                voteUpvotes = state.upvotes
+                voteHasVoted = state.hasVoted
+            }
+        }
+    }
 
     suspend fun load(reset: Boolean) {
         val res = FeedbackJar.listComments(post.id, limit = 50, cursor = if (reset) null else cursor)
@@ -471,7 +524,10 @@ private fun DetailScreen(
                 Text(post.title, fontSize = BodySize, fontWeight = FontWeight.Bold, color = theme.text, modifier = Modifier.weight(1f))
                 if (config.allowVotes) {
                     Spacer(Modifier.width(12.dp))
-                    VotePill(theme, post.id, post.upvotes, post.hasVoted) { _, _ -> }
+                    VotePill(theme, post.id, voteUpvotes, voteHasVoted) { u, v ->
+                        voteUpvotes = u
+                        voteHasVoted = v
+                    }
                 }
             }
             val meta = buildString {
@@ -541,9 +597,16 @@ private fun DetailScreen(
                         .clickable(enabled = draft.isNotBlank() && !sending) {
                             val text = draft.trim()
                             val parentId = replyTo?.id
+                            val identity = commentIdentity?.invoke()
                             sending = true
                             scope.launch {
-                                val res = FeedbackJar.addComment(post.id, text, parentId = parentId)
+                                val res = FeedbackJar.addComment(
+                                    post.id,
+                                    text,
+                                    parentId = parentId,
+                                    name = identity?.first,
+                                    email = identity?.second,
+                                )
                                 sending = false
                                 res.onSuccess {
                                     draft = ""
@@ -604,6 +667,7 @@ private fun CommentRow(
 private fun NewFeedbackScreen(
     theme: FjTheme,
     config: WidgetConfig,
+    properties: (() -> Map<String, Any?>?)? = null,
     onCancel: () -> Unit,
     onDone: () -> Unit,
 ) {
@@ -655,6 +719,7 @@ private fun NewFeedbackScreen(
                     content = text.trim(),
                     email = if (config.collectEmail) email.trim().ifEmpty { null } else null,
                     userName = if (config.collectName) name.trim().ifEmpty { null } else null,
+                    properties = properties?.invoke(),
                 )
                 sending = false
                 res.onSuccess {

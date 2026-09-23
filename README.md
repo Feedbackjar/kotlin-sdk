@@ -25,7 +25,7 @@ dependencyResolutionManagement {
 
 ```kotlin
 dependencies {
-    implementation("com.feedbackjar:sdk:1.5.1")
+    implementation("com.feedbackjar:sdk:1.6.0")
 }
 ```
 
@@ -172,6 +172,28 @@ println(identity.name)  // "Ada Lovelace"
 // e.g. on logout
 FeedbackJar.clearIdentity()
 ```
+
+This is unverified — anyone can type any email. It's stored per-install, so votes/comments still key on this device's anonymous id, not this identity.
+
+### Verified identity (signed-in users)
+
+If your app has its own signed-in users and you want their votes/comments attributed to a real, verifiable account — consistent across every device they use, not just the one they voted from — pass a signed identity instead. Your **backend** computes the signature (never the app):
+
+```kotlin
+// Your backend, once the user is authenticated:
+//   timestamp = System.currentTimeMillis()
+//   signature = HMAC-SHA256(orgSecretKey, "$userId:$email:$timestamp")
+// (org secret key is in the FeedbackJar dashboard — the same one used for portal auto-login)
+
+FeedbackJar.setIdentity(
+    userId = "user_123",
+    email = "ada@example.com",
+    signature = signatureFromYourBackend,
+    timestamp = timestampFromYourBackend,
+)
+```
+
+Once set, `vote`, `addComment`, `submit`, and `hasVoted` all attach to this real user — on every device, immediately, not just the one that called `setIdentity`. The first vote/comment after setting it also folds in anything this device already did anonymously, so nothing doubles up. `timestamp` must be the exact value your backend signed (never a fresh client-side timestamp), and expires after 7 days — call `setIdentity` again on each sign-in to refresh it. `clearIdentity()` removes this too (e.g. on logout).
 
 ## Listing feedback
 
@@ -332,6 +354,7 @@ spans in the Views UI, `AnnotatedString` in Compose.
 | `suspend addComment(postId, content, parentId?, name?, email?): Result<CommentResponse>` | Add a comment or reply as the guest. `name`/`email` fall back to the remembered identity. |
 | `addComment(postId, content, parentId?, name?, email?, callback)` | Callback variant. |
 | `setIdentity(name?, email?)` | Remember a submitter's name/email for future `submit()` calls; also best-effort synced to the server. |
+| `setIdentity(userId, email, signature, timestamp, name?, firstName?, lastName?, avatar?)` | Set a **verified**, org-signed identity — see [Verified identity](#verified-identity-signed-in-users). |
 | `getIdentity(): FeedbackIdentity` | The currently remembered identity, if any. |
 | `clearIdentity()` | Forget the remembered identity. |
 
@@ -393,6 +416,12 @@ data class WidgetConfig(
 data class FeedbackIdentity(
     val name: String?,
     val email: String?,
+    val userId: String?,      // set only via a verified setIdentity() call
+    val signature: String?,
+    val timestamp: Long?,     // milliseconds since epoch — the value your backend signed
+    val firstName: String?,
+    val lastName: String?,
+    val avatar: String?,
 )
 ```
 

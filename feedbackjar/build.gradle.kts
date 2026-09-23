@@ -20,7 +20,7 @@ android {
         buildConfigField(
             "String",
             "SDK_VERSION",
-            "\"${System.getenv("VERSION") ?: "1.5.1"}\"",
+            "\"${System.getenv("VERSION") ?: "1.7.0"}\"",
         )
     }
 
@@ -63,7 +63,7 @@ mavenPublishing {
     coordinates(
         groupId = "com.feedbackjar",
         artifactId = "sdk",
-        version = System.getenv("VERSION") ?: "1.5.1",
+        version = System.getenv("VERSION") ?: "1.7.0",
     )
 
     pom {

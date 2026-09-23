@@ -17,6 +17,23 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
+import android.util.Base64
+
+/**
+ * Wire shape for an org-signed identity — mirrors the JS widget's `identify()` /
+ * portal auto-login payload. Sent as `X-FeedbackJar-Identity` (base64 JSON) on
+ * vote/comment/list calls, and as an `identity` body field on submit.
+ */
+@Serializable
+internal data class SignedIdentity(
+    val userId: String,
+    val email: String,
+    val timestamp: Long,
+    val signature: String,
+    val firstName: String? = null,
+    val lastName: String? = null,
+    val avatar: String? = null,
+)
 
 @Serializable
 private data class SubmitRequest(
@@ -25,6 +42,7 @@ private data class SubmitRequest(
     val userId: String? = null,
     val userName: String? = null,
     val metadata: JsonObject,
+    val identity: SignedIdentity? = null,
 )
 
 @Serializable
@@ -146,6 +164,27 @@ internal class ApiClient(private val appId: String? = null) {
         return this
     }
 
+    /**
+     * Attach a verified identity, if present — the server attributes the vote/
+     * comment/`hasVoted` lookup to this real user instead of the anonymous id.
+     * A missing or encode-failing identity silently sends no header (falls back
+     * to anonymous), never fails the request.
+     */
+    private fun Request.Builder.withIdentityHeader(identity: SignedIdentity?): Request.Builder {
+        if (identity != null) {
+            try {
+                val encoded = Base64.encodeToString(
+                    json.encodeToString(identity).toByteArray(Charsets.UTF_8),
+                    Base64.NO_WRAP,
+                )
+                addHeader("X-FeedbackJar-Identity", encoded)
+            } catch (_: Exception) {
+                // Fall back to anonymous.
+            }
+        }
+        return this
+    }
+
     /** Turns a non-2xx response body into a [Throwable], surfacing `{"error": "..."}` verbatim. */
     private fun errorFrom(raw: String, code: Int, fallback: String): Throwable {
         val message = try {
@@ -167,8 +206,8 @@ internal class ApiClient(private val appId: String? = null) {
         replies = replies.map { it.toModel() },
     )
 
-    fun submit(widgetId: String, content: String, email: String? = null, userName: String? = null, metadata: JsonObject): Result<FeedbackResponse> {
-        val body = json.encodeToString(SubmitRequest(content = content, email = email, userName = userName, metadata = metadata))
+    fun submit(widgetId: String, content: String, email: String? = null, userName: String? = null, metadata: JsonObject, identity: SignedIdentity? = null): Result<FeedbackResponse> {
+        val body = json.encodeToString(SubmitRequest(content = content, email = email, userName = userName, metadata = metadata, identity = identity))
             .toRequestBody(jsonMediaType)
 
         val request = Request.Builder()
@@ -205,6 +244,7 @@ internal class ApiClient(private val appId: String? = null) {
         limit: Int,
         cursor: String?,
         anonId: String?,
+        identity: SignedIdentity? = null,
     ): Result<FeedbackListResult> {
         val url = buildString {
             append("$baseUrl/widget/$widgetId/posts?limit=$limit")
@@ -215,6 +255,7 @@ internal class ApiClient(private val appId: String? = null) {
         val request = Request.Builder().url(url).get()
             .withAppIdHeader()
             .withAnonIdHeader(anonId)
+            .withIdentityHeader(identity)
             .build()
 
         return try {
@@ -255,12 +296,13 @@ internal class ApiClient(private val appId: String? = null) {
     )
 
     /** One public post by id — resolves `#[title](postId)` mention jump-links. */
-    fun getPost(widgetId: String, postId: String, anonId: String?): Result<FeedbackPost> {
+    fun getPost(widgetId: String, postId: String, anonId: String?, identity: SignedIdentity? = null): Result<FeedbackPost> {
         val request = Request.Builder()
             .url("$baseUrl/widget/$widgetId/posts/$postId")
             .get()
             .withAppIdHeader()
             .withAnonIdHeader(anonId)
+            .withIdentityHeader(identity)
             .build()
 
         return try {
@@ -312,12 +354,14 @@ internal class ApiClient(private val appId: String? = null) {
         postId: String,
         action: String,
         anonId: String,
+        identity: SignedIdentity?,
     ): Result<VoteState> {
         val request = Request.Builder()
             .url("$baseUrl/widget/$widgetId/posts/$postId/$action")
             .post(ByteArray(0).toRequestBody())
             .withAppIdHeader()
             .withAnonIdHeader(anonId)
+            .withIdentityHeader(identity)
             .build()
 
         return try {
@@ -335,18 +379,19 @@ internal class ApiClient(private val appId: String? = null) {
         }
     }
 
-    fun vote(widgetId: String, postId: String, anonId: String): Result<VoteState> =
-        voteRequest(widgetId, postId, "vote", anonId)
+    fun vote(widgetId: String, postId: String, anonId: String, identity: SignedIdentity? = null): Result<VoteState> =
+        voteRequest(widgetId, postId, "vote", anonId, identity)
 
-    fun unvote(widgetId: String, postId: String, anonId: String): Result<VoteState> =
-        voteRequest(widgetId, postId, "unvote", anonId)
+    fun unvote(widgetId: String, postId: String, anonId: String, identity: SignedIdentity? = null): Result<VoteState> =
+        voteRequest(widgetId, postId, "unvote", anonId, identity)
 
-    fun getVoteState(widgetId: String, postId: String, anonId: String): Result<VoteState> {
+    fun getVoteState(widgetId: String, postId: String, anonId: String, identity: SignedIdentity? = null): Result<VoteState> {
         val request = Request.Builder()
             .url("$baseUrl/widget/$widgetId/posts/$postId/vote")
             .get()
             .withAppIdHeader()
             .withAnonIdHeader(anonId)
+            .withIdentityHeader(identity)
             .build()
 
         return try {
@@ -405,6 +450,7 @@ internal class ApiClient(private val appId: String? = null) {
         name: String? = null,
         email: String? = null,
         anonId: String,
+        identity: SignedIdentity? = null,
     ): Result<CommentResponse> {
         val body = json.encodeToString(
             CreateCommentRequest(content = content, parentId = parentId, name = name, email = email)
@@ -415,6 +461,7 @@ internal class ApiClient(private val appId: String? = null) {
             .post(body)
             .withAppIdHeader()
             .withAnonIdHeader(anonId)
+            .withIdentityHeader(identity)
             .build()
 
         return try {

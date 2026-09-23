@@ -38,6 +38,16 @@ class FeedbackJarView @JvmOverloads constructor(
     /** Restrict the board to a single FeedbackJar board id. Set before attaching. */
     var boardId: String? = null
 
+    /** Called on each submission from the board's own "New" screen, to get custom
+     * key/value pairs merged into the auto-collected metadata. Forwarded verbatim to
+     * [FeedbackJar.submit]'s `properties` parameter. */
+    var propertiesProvider: (() -> Map<String, Any?>?)? = null
+
+    /** Called on each comment sent from a post's detail screen, to get the name/email
+     * (`first`/`second`) to attach to it. Return `null`, or a `null` field, to fall back
+     * to the remembered identity. */
+    var commentIdentityProvider: (() -> Pair<String?, String?>?)? = null
+
     private var scope: CoroutineScope? = null
     private var config = WidgetConfig(
         collectName = false,
@@ -47,6 +57,7 @@ class FeedbackJarView @JvmOverloads constructor(
     )
 
     private var board: BoardListView? = null
+    private var pendingOpenPostId: String? = null
 
     /** Accent for the active vote state, the primary button and links. */
     fun setAccentColor(color: Int) {
@@ -60,6 +71,10 @@ class FeedbackJarView @JvmOverloads constructor(
         val s = CoroutineScope(Dispatchers.Main + SupervisorJob())
         scope = s
         showBoard()
+        pendingOpenPostId?.let { postId ->
+            pendingOpenPostId = null
+            openPostById(postId)
+        }
         s.launch {
             FeedbackJar.getConfig().onSuccess { loaded ->
                 config = loaded
@@ -108,6 +123,7 @@ class FeedbackJarView @JvmOverloads constructor(
                 post = post,
                 onBack = { showBoard() },
                 onPostPress = { openPostById(it) },
+                commentIdentityProvider = commentIdentityProvider,
             ),
         )
     }
@@ -116,6 +132,15 @@ class FeedbackJarView @JvmOverloads constructor(
     private fun openPostById(postId: String) {
         val s = scope ?: return
         s.launch { FeedbackJar.getPost(postId).onSuccess { showDetail(it) } }
+    }
+
+    /**
+     * Jump straight to a post's detail screen — e.g. from a push-notification tap on an
+     * already-mounted board. Safe to call before the view is attached to a window; the
+     * jump is deferred until then.
+     */
+    fun openPost(postId: String) {
+        if (scope != null) openPostById(postId) else pendingOpenPostId = postId
     }
 
     private fun showNew() {
@@ -129,8 +154,20 @@ class FeedbackJarView @JvmOverloads constructor(
                 config = config,
                 onDone = { showBoard() },
                 onCancel = { showBoard() },
+                propertiesProvider = propertiesProvider,
             ),
         )
+    }
+
+    /**
+     * Forget the remembered submitter identity (e.g. on logout) and refresh this
+     * already-mounted board as a clean anonymous guest: calls [FeedbackJar.clearIdentity],
+     * drops back to the board list and reloads it. A subsequent "New feedback" screen
+     * picks up the cleared identity automatically.
+     */
+    fun resetIdentity() {
+        FeedbackJar.clearIdentity()
+        if (scope != null) showBoard()
     }
 
     /** True while a screen other than the board is showing — lets a host handle Back. */

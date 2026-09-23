@@ -25,6 +25,9 @@ internal class NewFeedbackView(
     private val config: WidgetConfig,
     private val onDone: () -> Unit,
     private val onCancel: () -> Unit,
+    /** Called on submit, to get custom key/value pairs merged into the auto-collected
+     * metadata. Forwarded verbatim to [FeedbackJar.submit]'s `properties` parameter. */
+    private val propertiesProvider: (() -> Map<String, Any?>?)? = null,
 ) : LinearLayout(context) {
 
     private var sending = false
@@ -112,6 +115,7 @@ internal class NewFeedbackView(
                 content = text,
                 email = if (config.collectEmail) email?.takeIf { it.isNotEmpty() } else null,
                 userName = if (config.collectName) name?.takeIf { it.isNotEmpty() } else null,
+                properties = propertiesProvider?.invoke(),
             )
             sending = false
             sendButton.setEnabledAlpha(true)

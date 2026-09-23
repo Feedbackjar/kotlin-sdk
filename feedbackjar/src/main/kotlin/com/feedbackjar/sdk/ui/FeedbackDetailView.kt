@@ -36,6 +36,9 @@ internal class FeedbackDetailView(
     private var post: FeedbackPost,
     private val onBack: () -> Unit,
     private val onPostPress: ((String) -> Unit)? = null,
+    /** Called on each comment sent, to get the name/email (`first`/`second`) to attach to
+     * it. Return `null`, or a `null` field, to fall back to the remembered identity. */
+    private val commentIdentityProvider: (() -> Pair<String?, String?>?)? = null,
 ) : LinearLayout(context) {
 
     private companion object {
@@ -52,6 +55,7 @@ internal class FeedbackDetailView(
     private var replyTo: FeedbackComment? = null
     private var composerInput: EditText? = null
     private var replyBanner: View? = null
+    private var votePill: VotePillView? = null
 
     init {
         orientation = VERTICAL
@@ -84,6 +88,7 @@ internal class FeedbackDetailView(
             val pill = VotePillView(context, palette, accent, scope)
             pill.bind(post.id, post.upvotes, post.hasVoted)
             pill.onChange = { upvotes, voted -> post = post.copy(upvotes = upvotes, hasVoted = voted) }
+            votePill = pill
             topRow.addView(pill, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
                 marginStart = context.dp(12)
             })
@@ -124,6 +129,17 @@ internal class FeedbackDetailView(
 
         renderComments()
         loadComments(reset = true)
+        if (config.allowVotes) refreshVoteState()
+    }
+
+    /** The cached [post] data can be stale — read the authoritative vote state once on open. */
+    private fun refreshVoteState() {
+        scope.launch {
+            FeedbackJar.getVoteState(post.id).onSuccess { state ->
+                post = post.copy(upvotes = state.upvotes, hasVoted = state.hasVoted)
+                votePill?.bind(post.id, state.upvotes, state.hasVoted)
+            }
+        }
     }
 
     private fun loadComments(reset: Boolean) {
@@ -341,8 +357,15 @@ internal class FeedbackDetailView(
         input.setEnabledAlpha(false)
 
         val parentId = replyTo?.id
+        val identity = commentIdentityProvider?.invoke()
         scope.launch {
-            val res = FeedbackJar.addComment(post.id, text, parentId = parentId)
+            val res = FeedbackJar.addComment(
+                post.id,
+                text,
+                parentId = parentId,
+                name = identity?.first,
+                email = identity?.second,
+            )
             sending = false
             input.setEnabledAlpha(true)
             res.onSuccess {

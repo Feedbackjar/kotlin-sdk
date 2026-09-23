@@ -4,6 +4,7 @@ import android.content.Context
 import com.feedbackjar.sdk.internal.AnonId
 import com.feedbackjar.sdk.internal.ApiClient
 import com.feedbackjar.sdk.internal.MetadataCollector
+import com.feedbackjar.sdk.internal.SignedIdentity
 import com.feedbackjar.sdk.internal.toJsonObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -48,6 +49,15 @@ object FeedbackJar {
     private const val PREFS_NAME = "com.feedbackjar.sdk.prefs"
     private const val PREF_NAME_KEY = "identity_name"
     private const val PREF_EMAIL_KEY = "identity_email"
+    private const val PREF_USER_ID_KEY = "identity_user_id"
+    private const val PREF_SIGNATURE_KEY = "identity_signature"
+    private const val PREF_TIMESTAMP_KEY = "identity_timestamp"
+    private const val PREF_FIRST_NAME_KEY = "identity_first_name"
+    private const val PREF_LAST_NAME_KEY = "identity_last_name"
+    private const val PREF_AVATAR_KEY = "identity_avatar"
+
+    /** 7 days — must match `WIDGET_IDENTITY_MAX_AGE_MS` on the server. */
+    private const val IDENTITY_MAX_AGE_MS = 7L * 24 * 60 * 60 * 1000
 
     private var widgetId: String? = null
     private var appContext: Context? = null
@@ -89,14 +99,58 @@ object FeedbackJar {
     }
 
     /**
+     * Set a **verified** submitter identity — the same org-signed
+     * `{userId, email, timestamp, signature}` payload your backend computes for
+     * portal auto-login (`HMAC-SHA256(orgSecretKey, "userId:email:timestamp")`).
+     * Once set, [vote], [addComment], [submit], and the feed's `hasVoted` all
+     * attach to this real user instead of the install's anonymous id — and the
+     * first time it's sent, any votes/comments already made anonymously on this
+     * device are folded onto that user server-side.
+     *
+     * [timestamp] must be the exact millisecond value your backend signed —
+     * never a fresh client-side timestamp, or the signature will fail
+     * verification. Expires after 7 days; call this again (e.g. on each sign-in)
+     * to refresh it.
+     */
+    fun setIdentity(
+        userId: String,
+        email: String,
+        signature: String,
+        timestamp: Long,
+        name: String? = null,
+        firstName: String? = null,
+        lastName: String? = null,
+        avatar: String? = null,
+    ) {
+        val ctx = appContext ?: return
+        val editor = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putString(PREF_USER_ID_KEY, userId)
+            .putString(PREF_EMAIL_KEY, email)
+            .putString(PREF_SIGNATURE_KEY, signature)
+            .putLong(PREF_TIMESTAMP_KEY, timestamp)
+        if (name != null) editor.putString(PREF_NAME_KEY, name)
+        if (firstName != null) editor.putString(PREF_FIRST_NAME_KEY, firstName)
+        if (lastName != null) editor.putString(PREF_LAST_NAME_KEY, lastName)
+        if (avatar != null) editor.putString(PREF_AVATAR_KEY, avatar)
+        editor.apply()
+    }
+
+    /**
      * The currently remembered submitter identity, if any.
      */
     fun getIdentity(): FeedbackIdentity {
-        val ctx = appContext ?: return FeedbackIdentity(null, null)
+        val ctx = appContext ?: return FeedbackIdentity()
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val timestamp = prefs.getLong(PREF_TIMESTAMP_KEY, 0L)
         return FeedbackIdentity(
             name = prefs.getString(PREF_NAME_KEY, null),
             email = prefs.getString(PREF_EMAIL_KEY, null),
+            userId = prefs.getString(PREF_USER_ID_KEY, null),
+            signature = prefs.getString(PREF_SIGNATURE_KEY, null),
+            timestamp = if (timestamp > 0) timestamp else null,
+            firstName = prefs.getString(PREF_FIRST_NAME_KEY, null),
+            lastName = prefs.getString(PREF_LAST_NAME_KEY, null),
+            avatar = prefs.getString(PREF_AVATAR_KEY, null),
         )
     }
 
@@ -106,6 +160,33 @@ object FeedbackJar {
     fun clearIdentity() {
         val ctx = appContext ?: return
         ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().clear().apply()
+    }
+
+    /**
+     * The stored identity as a wire-ready [SignedIdentity], or null when it isn't
+     * verified (no signature) or has aged past [IDENTITY_MAX_AGE_MS] — callers
+     * then fall back to the anonymous id, same as if [setIdentity] was never
+     * called with a signature.
+     */
+    private fun verifiedIdentity(): SignedIdentity? {
+        val identity = getIdentity()
+        val userId = identity.userId?.takeIf { it.isNotEmpty() } ?: return null
+        val email = identity.email?.takeIf { it.isNotEmpty() } ?: return null
+        val signature = identity.signature?.takeIf { it.isNotEmpty() } ?: return null
+        val timestamp = identity.timestamp ?: return null
+
+        val ageMs = System.currentTimeMillis() - timestamp
+        if (ageMs < 0 || ageMs > IDENTITY_MAX_AGE_MS) return null
+
+        return SignedIdentity(
+            userId = userId,
+            email = email,
+            timestamp = timestamp,
+            signature = signature,
+            firstName = identity.firstName,
+            lastName = identity.lastName,
+            avatar = identity.avatar,
+        )
     }
 
     /**
@@ -148,7 +229,7 @@ object FeedbackJar {
             }
         }
         val apiClient = client ?: return@withContext notInitialized()
-        apiClient.submit(id, content, email ?: identity.email, userName ?: identity.name, finalMetadata)
+        apiClient.submit(id, content, email ?: identity.email, userName ?: identity.name, finalMetadata, verifiedIdentity())
     }
 
     /**
@@ -187,7 +268,7 @@ object FeedbackJar {
         val ctx = appContext ?: return@withContext notInitialized()
         val id = widgetId ?: return@withContext notInitialized()
         val apiClient = client ?: return@withContext notInitialized()
-        apiClient.listFeedback(id, boardId, limit.coerceIn(1, 50), cursor, AnonId.get(ctx))
+        apiClient.listFeedback(id, boardId, limit.coerceIn(1, 50), cursor, AnonId.get(ctx), verifiedIdentity())
     }
 
     /**
@@ -212,7 +293,7 @@ object FeedbackJar {
         val ctx = appContext ?: return@withContext notInitialized()
         val id = widgetId ?: return@withContext notInitialized()
         val apiClient = client ?: return@withContext notInitialized()
-        apiClient.getPost(id, postId, AnonId.get(ctx))
+        apiClient.getPost(id, postId, AnonId.get(ctx), verifiedIdentity())
     }
 
     /**
@@ -253,7 +334,7 @@ object FeedbackJar {
         val ctx = appContext ?: return@withContext notInitialized()
         val id = widgetId ?: return@withContext notInitialized()
         val apiClient = client ?: return@withContext notInitialized()
-        apiClient.vote(id, postId, AnonId.get(ctx))
+        apiClient.vote(id, postId, AnonId.get(ctx), verifiedIdentity())
     }
 
     /** Upvote a post with a callback. Safe to call from the main thread. */
@@ -268,7 +349,7 @@ object FeedbackJar {
         val ctx = appContext ?: return@withContext notInitialized()
         val id = widgetId ?: return@withContext notInitialized()
         val apiClient = client ?: return@withContext notInitialized()
-        apiClient.unvote(id, postId, AnonId.get(ctx))
+        apiClient.unvote(id, postId, AnonId.get(ctx), verifiedIdentity())
     }
 
     /** Remove this install's upvote with a callback. Safe to call from the main thread. */
@@ -284,7 +365,7 @@ object FeedbackJar {
         val ctx = appContext ?: return@withContext notInitialized()
         val id = widgetId ?: return@withContext notInitialized()
         val apiClient = client ?: return@withContext notInitialized()
-        apiClient.getVoteState(id, postId, AnonId.get(ctx))
+        apiClient.getVoteState(id, postId, AnonId.get(ctx), verifiedIdentity())
     }
 
     /** Read a post's vote state with a callback. Safe to call from the main thread. */
@@ -349,6 +430,7 @@ object FeedbackJar {
             name = name ?: identity.name,
             email = email ?: identity.email,
             anonId = AnonId.get(ctx),
+            identity = verifiedIdentity(),
         )
     }
 

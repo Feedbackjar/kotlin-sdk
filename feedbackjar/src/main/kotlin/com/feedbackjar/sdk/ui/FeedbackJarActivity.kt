@@ -13,6 +13,8 @@ import com.feedbackjar.sdk.FeedbackJar
  * startActivity(FeedbackJarActivity.intent(context))
  * // optional accent:
  * startActivity(FeedbackJarActivity.intent(context, Color.parseColor("#e5484d")))
+ * // jump straight into a post's detail screen, e.g. from a push notification:
+ * startActivity(FeedbackJarActivity.intent(context, postId = "post_123"))
  * ```
  *
  * Requires [FeedbackJar.init] to have been called first.
@@ -30,6 +32,9 @@ class FeedbackJarActivity : Activity() {
         }
         window.setBackgroundDrawable(null)
         setContentView(board)
+        // A fresh FeedbackJarView reads FeedbackJar.getIdentity() live when it builds its
+        // "New feedback" screen, so a cleared identity is always picked up on this launch.
+        intent.getStringExtra(EXTRA_POST_ID)?.let { board.openPost(it) }
     }
 
     @Deprecated("Deprecated in Java")
@@ -44,11 +49,16 @@ class FeedbackJarActivity : Activity() {
         /** Optional `int` (packed ARGB) colour extra for the board accent. */
         const val EXTRA_ACCENT_COLOR = "com.feedbackjar.sdk.ui.ACCENT_COLOR"
 
+        /** Optional `String` post id extra — launches straight into that post's detail
+         * screen, e.g. from a push-notification tap. */
+        const val EXTRA_POST_ID = "com.feedbackjar.sdk.ui.POST_ID"
+
         @JvmStatic
         @JvmOverloads
-        fun intent(context: Context, accentColor: Int? = null): Intent =
+        fun intent(context: Context, accentColor: Int? = null, postId: String? = null): Intent =
             Intent(context, FeedbackJarActivity::class.java).apply {
                 if (accentColor != null) putExtra(EXTRA_ACCENT_COLOR, accentColor)
+                if (postId != null) putExtra(EXTRA_POST_ID, postId)
             }
     }
 }
