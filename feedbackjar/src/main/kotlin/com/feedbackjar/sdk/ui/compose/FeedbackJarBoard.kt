@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -36,6 +37,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -427,38 +429,63 @@ private fun BoardScreen(
                 }
             }
 
-            else -> LazyColumn(
-                state = listState,
-                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 4.dp),
-                modifier = Modifier.fillMaxSize(),
-            ) {
-                items(posts, key = { it.id }) { post ->
-                    Column {
-                        Row(
-                            Modifier.fillMaxWidth().clickable { onOpen(post) }.padding(vertical = 16.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column(Modifier.weight(1f)) {
-                                Text(post.title, fontSize = BodySize, fontWeight = FontWeight.Bold, color = theme.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(richTextToPlainText(post.content), fontSize = BodySize, color = theme.textDim, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 4.dp))
-                                Text("${humanStatus(post.status)} · ${post.commentCount} comments", fontSize = SmallSize, color = theme.textDim, modifier = Modifier.padding(top = 4.dp))
-                            }
-                            if (config.allowVotes) {
-                                Spacer(Modifier.width(12.dp))
-                                VotePill(theme, post.id, post.upvotes, post.hasVoted) { u, v ->
-                                    val idx = posts.indexOfFirst { it.id == post.id }
-                                    if (idx >= 0) posts[idx] = posts[idx].copy(upvotes = u, hasVoted = v)
-                                }
-                            }
-                        }
-                        HairlineDivider(theme)
-                    }
-                }
-                if (loadingMore) {
-                    item { Spinner(theme, Modifier.fillMaxWidth().padding(16.dp)) }
-                }
+            else -> PostList(theme, config, posts, listState, loadingMore, onOpen)
+        }
+    }
+}
+
+// Kept out of BoardScreen so the list lambdas are not deeply nested: the
+// Compose stack trace mapping tool fails to parse long `$lambda$N` chains.
+@Composable
+private fun PostList(
+    theme: FjTheme,
+    config: WidgetConfig,
+    posts: SnapshotStateList<FeedbackPost>,
+    listState: LazyListState,
+    loadingMore: Boolean,
+    onOpen: (FeedbackPost) -> Unit,
+) {
+    LazyColumn(
+        state = listState,
+        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 4.dp),
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        items(posts, key = { it.id }) { post ->
+            PostRow(theme, config, post, onOpen) { u, v ->
+                val idx = posts.indexOfFirst { it.id == post.id }
+                if (idx >= 0) posts[idx] = posts[idx].copy(upvotes = u, hasVoted = v)
             }
         }
+        if (loadingMore) {
+            item { Spinner(theme, Modifier.fillMaxWidth().padding(16.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun PostRow(
+    theme: FjTheme,
+    config: WidgetConfig,
+    post: FeedbackPost,
+    onOpen: (FeedbackPost) -> Unit,
+    onVote: (Int, Boolean) -> Unit,
+) {
+    Column {
+        Row(
+            Modifier.fillMaxWidth().clickable { onOpen(post) }.padding(vertical = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(post.title, fontSize = BodySize, fontWeight = FontWeight.Bold, color = theme.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(richTextToPlainText(post.content), fontSize = BodySize, color = theme.textDim, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 4.dp))
+                Text("${humanStatus(post.status)} · ${post.commentCount} comments", fontSize = SmallSize, color = theme.textDim, modifier = Modifier.padding(top = 4.dp))
+            }
+            if (config.allowVotes) {
+                Spacer(Modifier.width(12.dp))
+                VotePill(theme, post.id, post.upvotes, post.hasVoted, onVote)
+            }
+        }
+        HairlineDivider(theme)
     }
 }
 

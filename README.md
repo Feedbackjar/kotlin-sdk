@@ -25,7 +25,7 @@ dependencyResolutionManagement {
 
 ```kotlin
 dependencies {
-    implementation("com.feedbackjar:sdk:1.6.0")
+    implementation("com.feedbackjar:sdk:1.7.1")
 }
 ```
 
